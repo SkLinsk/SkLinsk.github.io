@@ -6,7 +6,8 @@
 - `archives/index.html`：归档列表。
 - `assets/site.css`：全站样式。
 - `assets/theme.js`：白色、黑色与跟随系统模式。
-- `notes/sqp/index.html`：SQP 阅读页；同目录保留 Markdown 与 PDF 下载。
+- `notes/sqp/index.html`：SQP 四篇系列总目录；同目录保留合订版 Markdown 与 PDF。
+- `notes/sqp/basics/`、`curvature/`、`filter/`、`funnel/`：四篇独立阅读页，每篇都有 `note.md` 与 `note.pdf` 下载。
 - `notes/sqp/assets/katex/`：完整的公式样式、TeX 数学字体与许可证。
 - `.nojekyll`：让 GitHub Pages 直接发布原始静态文件。
 

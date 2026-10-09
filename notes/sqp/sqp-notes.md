@@ -1,106 +1,60 @@
-# SQP 约束优化：从局部模型到 Filter / Funnel
+# SQP、Filter 与 Funnel：四篇学习笔记
 
-> **核心结论**：SQP 用一系列二次规划（QP）产生约束优化方向；merit、filter、funnel 决定候选步如何获得接受；SOC 修补非线性约束的二阶偏差；restoration 在正常步骤失效时优先恢复可行性。
+按照 SQP 基础 → 二阶结构 → Filter → Funnel 的顺序阅读。
 
-**阅读说明**：本文按概念关系重组教学讨论，统一采用“约束 Jacobian 按行排列”的记号。可读取的原对话包含完整 SQP 流程、filter 的步类型与 switching、KKT 残差及 funnel；更早内容未由对话接口返回。因此 Jacobian、三次约束、Hessian、null-space 等部分按本次指定主题补充推导，三次约束例子是补充教学例，非原对话逐字复原。接受条件和伪代码标明其算法版本，不能把不同论文的条件随意拼接成一个有收敛证明的实现。
+---
 
-## 目录
+# SQP 基础：从约束线性化到 KKT–Newton
 
-1. 问题、记号与 SQP 的动机
-2. Jacobian 与线性化约束
-3. QP 子问题、KKT 与 Newton 本质
-4. 为什么使用 Lagrangian Hessian
-5. Exact SQP 与 quasi-Newton / BFGS
-6. 三次约束：一次完整的局部模型计算
-7. Reduced Hessian、null-space 与二阶条件
-8. Normal / tangential step
-9. Globalization 与 merit function
-10. Filter-SQP：接受区域与历史更新
-11. f-type、h-type 与 switching condition
-12. SOC 与 Maratos effect
-13. Restoration phase
-14. Funnel 方法
-15. 完整教学伪代码
-16. 常见误区与诊断
-17. 网页发布与笔记维护
-18. 一页式复习摘要
+> **核心结论**：SQP 每轮用一个二次规划产生候选方向。它同时处理目标下降与约束的一阶修复；线性化可行并不意味着真实非线性可行。
 
-## 1. 问题、记号与 SQP 的动机
+本文是四篇系列的第一篇。先理解方向如何产生，再进入第二篇的二阶结构、第三篇的 Filter 和第四篇的 Funnel。公式统一采用列向量梯度、按行排列的约束 Jacobian，以及 $g(x)\le0$ 的不等式约定。
 
-### 1.1 一般非线性规划
+## 1. SQP 解决什么问题？
 
-考虑光滑问题：
+考虑光滑非线性规划（NLP）：
 
 $$
-\min_{x\in\mathbb R^n} f(x),\qquad c(x)=0,\qquad g(x)\le0.
+\begin{aligned}
+\min_{x\in\mathbb R^n}\quad &f(x),\\
+\text{s.t.}\quad &c(x)=0,\quad g(x)\le0.
+\end{aligned}
 $$
 
-其中等式约束有 $m$ 个，不等式约束有 $p$ 个。固定符号约定：
+其中 $c:\mathbb R^n\to\mathbb R^m$，$g:\mathbb R^n\to\mathbb R^p$。负梯度只告诉我们如何降低目标，不知道哪些方向会破坏约束；可行域通常还是弯曲的。
+
+SQP 的策略是：在当前点把约束线性化，把优化结构近似为二次模型，求出方向后再决定走多远。
 
 $$
-L(x,\lambda,\mu)=f(x)+\lambda^Tc(x)+\mu^Tg(x),\qquad \mu\ge0.
+\text{NLP}\longrightarrow \text{QP}_0\longrightarrow \text{QP}_1\longrightarrow\cdots,
+\qquad x_{k+1}=x_k+\alpha_kd_k.
 $$
 
-| 符号 | 含义与维数 |
-| --- | --- |
-| $q_k=\nabla f(x_k)$ | 目标梯度，$n\times1$；避免与不等式函数 $g$ 混淆 |
-| $c_k,c(x_k)$ | 等式残差，$m\times1$ |
-| $g_k,g(x_k)$ | 不等式函数值，$p\times1$ |
-| $A_k=J_c(x_k)$ | 等式 Jacobian，$m\times n$ |
-| $C_k=J_g(x_k)$ | 不等式 Jacobian，$p\times n$ |
-| $B_k$ | Lagrangian Hessian 或其近似，$n\times n$ |
-| $d_k,\alpha_k$ | SQP 方向与步长，$x_{k+1}=x_k+\alpha_kd_k$ |
-| $h(x)$ | 约束违反度，非负标量 |
+“序列”意味着在新点重建模型，不是反复求解一个固定 QP。
 
-本文一般问题取
+## 2. Jacobian：变量移动如何改变约束？
+
+把各约束梯度转置后堆成行：
 
 $$
-h(x)=\|c(x)\|_1+\|[g(x)]_+\|_1,\qquad [g]_j^+=\max(g_j,0).
+A_k=J_c(x_k)=\begin{bmatrix}\nabla c_1(x_k)^T\\\vdots\\\nabla c_m(x_k)^T\end{bmatrix}\in\mathbb R^{m\times n}.
 $$
 
-等式几何推导有时使用二范数；每次涉及数值阈值时应固定范数与缩放。$h$ 的不同定义会改变参数含义。
-
-### 1.2 为什么不是直接沿负梯度走？
-
-负梯度只知道目标在哪里下降，不知道哪些方向会破坏约束。可行域又通常是弯曲的：当前切平面上的直线移动，并不一定停留在真实可行域上。
-
-SQP 把两类信息放进一个局部模型：**用线性约束描述当前允许的移动，用二次模型描述约束优化的曲率**。每次解一个 QP，再在新点重建模型。
-
-> **核心结论**：SQP 的“sequential”指连续重建和求解 QP；不是一次 QP 就能准确替代原非线性问题。
-
-## 2. Jacobian 与线性化约束
-
-### 2.1 $J_c$ 究竟是什么？
-
-将每个约束的梯度转置后堆成行：
+一阶展开为
 
 $$
-J_c(x)=\begin{bmatrix}\nabla c_1(x)^T\\\vdots\\\nabla c_m(x)^T\end{bmatrix}.
+c(x_k+d)=c_k+A_kd+O(\|d\|^2),\qquad c_k=c(x_k).
 $$
 
-Taylor 展开给出
+$c_k$ 是当前残差，$A_kd$ 是沿方向移动时约束的一阶变化。于是 $c_k+A_kd=0$ 表示：**局部线性模型预测下一点可行**。
 
-$$
-c(x_k+d)=c_k+A_kd+O(\|d\|^2).
-$$
+若 $c_k=0$ 且 $A_k$ 满行秩，$A_kd=0$ 描述可行流形的切空间；若 $c_k\ne0$，则 $A_kd=-c_k$ 是修复残差的仿射条件。
 
-因此 QP 要求 $c_k+A_kd=0$，是在要求**线性模型预测下一点可行**。
+> **容易混淆的地方**：可行点的切向条件是 $Ad=0$，不可行点的 SQP 约束通常是 $Ad=-c$。后者不是经过原点的向量空间。
 
-### 2.2 $A_kd=0$ 什么时候表示切空间？
+## 3. SQP 的 QP 子问题
 
-若 $x_k$ 已经可行且 $A_k$ 满行秩，则可行流形的切空间是
-
-$$
-\mathcal T_k=\{d:A_kd=0\}=\ker A_k.
-$$
-
-若 $c_k\ne0$，则恢复线性可行性的条件是 $A_kd=-c_k$。这是仿射集合，不是经过原点的切空间。
-
-> **核心结论**：$J_c$ 把“变量怎么动”映射成“约束一阶怎么变”。约束不是一个标量时，不能只拿某一条约束的梯度代替整个 Jacobian。
-
-## 3. QP 子问题、KKT 与 Newton 本质
-
-### 3.1 标准 SQP 子问题
+记 $q_k=\nabla f(x_k)$、$C_k=J_g(x_k)$，避免把目标梯度与不等式函数 $g$ 混用。
 
 $$
 \begin{aligned}
@@ -110,9 +64,56 @@ $$
 \end{aligned}
 $$
 
-常数 $f_k$ 不影响解，故省略。QP 返回方向 $d_k$ 和乘子 $\widehat\lambda_k,\widehat\mu_k$。这里的 QP 乘子是新的乘子估计，**不是默认等于乘子增量**。
+常数 $f_k$ 不影响最小解，故省略。理论上的 exact SQP 取
 
-QP 的 KKT 条件为
+$$
+B_k=\nabla^2_{xx}L(x_k,\lambda_k,\mu_k),\quad
+L=f+\lambda^Tc+\mu^Tg,\quad \mu\ge0.
+$$
+
+它不是只对目标做 Taylor 展开后得到的普通二次模型：$B_k$ 含约束曲率，第二篇会推导其来源。QP 的约束仍然是线性的。
+
+## 4. 单位圆上的第一步
+
+考虑
+
+$$
+f(x,y)=(x-2)^2+(y-1)^2,\qquad c(x,y)=x^2+y^2-1=0.
+$$
+
+几何上是在单位圆寻找最靠近 $(2,1)$ 的点，真实解为
+
+$$
+(x_*,y_*)=\left(\frac2{\sqrt5},\frac1{\sqrt5}\right).
+$$
+
+从 $(1,0)$ 出发，取初始乘子 $\lambda_0=0$，于是 $B_0=2I$。当前信息为
+
+$$
+q_0=\begin{bmatrix}-2\\-2\end{bmatrix},\qquad
+A_0=\begin{bmatrix}2&0\end{bmatrix},\qquad c_0=0.
+$$
+
+QP 为
+
+$$
+\min_{u,v}\ -2u-2v+u^2+v^2,\qquad 2u=0.
+$$
+
+所以 $d_0=(0,1)^T$。它确实沿圆在 $(1,0)$ 的切线移动，但完整步到达 $(1,1)$，真实残差为 $1$。
+
+对任意步长 $\alpha$，有
+
+$$
+c(1,\alpha)=\alpha^2,\qquad
+f(1,\alpha)=2-2\alpha+\alpha^2.
+$$
+
+因此当 $0<\alpha<2$ 时目标下降，约束却出现二阶误差。这不是 QP 算错，而是模型只满足一阶约束。第三篇的接受规则和 SOC 正是为这种差异服务。
+
+## 5. QP 的 KKT 条件
+
+QP 解返回 $d_k$ 和乘子估计 $\widehat\lambda_k,\widehat\mu_k$：
 
 $$
 \begin{aligned}
@@ -124,11 +125,7 @@ g_k+C_kd_k&\le0,\\
 \end{aligned}
 $$
 
-若 QP 凸，这些条件在适当正则性下刻画最优解；若 QP 非凸，满足 KKT 本身不保证它是最小点。
-
-### 3.2 等式情形的 KKT 线性系统
-
-只含等式时：
+等式情形可以写成 saddle-point 系统：
 
 $$
 \begin{bmatrix}B_k&A_k^T\\A_k&0\end{bmatrix}
@@ -136,17 +133,17 @@ $$
 =-\begin{bmatrix}q_k\\c_k\end{bmatrix}.
 $$
 
-注意这个块矩阵通常是不定的，即使 $B_k$ 正定，也不能把整个 KKT 矩阵当成正定矩阵。
+即使 $B_k\succ0$，整个 KKT 块矩阵通常也是不定矩阵。若 QP 凸，KKT 在适当条件下刻画最优解；若 QP 非凸，仅满足 KKT 不能保证取到最小点。
 
-### 3.3 为什么说 SQP 是对 KKT 做 Newton？
+## 6. SQP 为什么等价于 KKT–Newton？
 
-等式 NLP 的方程是
+只考虑等式。原 NLP 的一阶方程为
 
 $$
 F(x,\lambda)=\begin{bmatrix}\nabla_xL(x,\lambda)\\c(x)\end{bmatrix}=0.
 $$
 
-在当前点线性化：
+Newton 线性化得到
 
 $$
 \begin{bmatrix}\nabla^2_{xx}L_k&A_k^T\\A_k&0\end{bmatrix}
@@ -154,593 +151,720 @@ $$
 =-\begin{bmatrix}\nabla_xL_k\\c_k\end{bmatrix}.
 $$
 
-用 $\widehat\lambda_k=\lambda_k+\Delta\lambda_k$，第一行就变成 QP stationarity。因此 exact SQP 的等式步骤与 KKT-Newton 步一致。对不等式，局部固定活跃集后有类似解释，但还要处理活跃集变化和互补条件。
-
-## 4. 为什么使用 Lagrangian Hessian
-
-### 4.1 目标曲率之外，还有约束曲率
+令 $\widehat\lambda_k=\lambda_k+\Delta\lambda_k$，第一行变成
 
 $$
-\nabla^2_{xx}L
-=\nabla^2f+\sum_{i=1}^m\lambda_i\nabla^2c_i
-+\sum_{j=1}^p\mu_j\nabla^2g_j.
+q_k+B_kd_k+A_k^T\widehat\lambda_k=0.
 $$
 
-“对 $x$ 求二阶导”时乘子固定。它不是同时对 $x,\lambda,\mu$ 求 Hessian。$B_k$ 中的约束曲率并不意味着 QP 约束也变成二次约束；QP 约束依然线性。
+这正是等式 QP 的 stationarity。因此 exact SQP 的方向可理解为对原 KKT 方程做 Newton。对不等式，局部固定活跃集后可作类似解释，还须处理活跃集改变和互补性。
 
-### 4.2 沿可行曲线推导
+> **核心结论**：QP 乘子是更新后的乘子估计；Newton 系统里的 $\Delta\lambda$ 是增量。两者相差当前乘子，不能把两个记号混为一谈。
 
-只考虑等式，在 KKT 点 $x_*$ 上取一条可行曲线 $x(t)$，满足 $x(0)=x_*$、$x'(0)=v$。因为 $c(x(t))=0$，
+## 7. Exact 与 quasi-Newton / BFGS
 
-$$
-A_*v=0,\qquad
-A_*x''(0)+\begin{bmatrix}v^T\nabla^2c_1v\\\vdots\\v^T\nabla^2c_mv\end{bmatrix}=0.
-$$
+Exact SQP 显式计算 Lagrangian Hessian。Quasi-Newton SQP 用梯度差构造近似，以降低二阶导成本。
 
-目标沿曲线的二阶导包含“路径转弯”这一项：
-
-$$
-\frac{d^2}{dt^2}f(x(t))\bigg|_0
-=v^T\nabla^2fv+\nabla f^Tx''(0).
-$$
-
-由 stationarity $\nabla f=-A_*^T\lambda_*$，代入得
-
-$$
-\frac{d^2}{dt^2}f(x(t))\bigg|_0
-=v^T\left(\nabla^2f+\sum_i\lambda_{*,i}\nabla^2c_i\right)v
-=v^T\nabla^2_{xx}Lv.
-$$
-
-> **核心结论**：$\nabla^2f$ 看直线上的目标曲率；$\nabla^2_{xx}L$ 把沿弯曲可行域运动的效应计入。这也是 KKT-Newton 系统自然出现它的原因。
-
-## 5. Exact SQP 与 quasi-Newton / BFGS
-
-### 5.1 Exact SQP
-
-每次计算 $B_k=\nabla^2_{xx}L(x_k,\lambda_k,\mu_k)$。在解附近、LICQ、二阶充分条件及足够光滑等假设下，完整 Newton 步可以获得很快的局部收敛。远离解时，真实 Hessian 可能不定，QP 可能无界；需要修正曲率、信赖域或合适的非凸子问题处理。
-
-### 5.2 Quasi-Newton SQP
-
-不用显式二阶导，而利用梯度变化近似 Lagrangian Hessian。令实际接受的位移为
-
-$$
-s_k=x_{k+1}-x_k,
-$$
-
-在新旧两点使用**相同的更新后乘子**构造
+定义实际接受的位移 $s_k=x_{k+1}-x_k$，使用同一组新乘子构造
 
 $$
 y_k=\nabla_xL(x_{k+1},\lambda_{k+1},\mu_{k+1})
 -\nabla_xL(x_k,\lambda_{k+1},\mu_{k+1}).
 $$
 
-这样主要捕捉 $x$ 改变带来的曲率，而不是乘子改变本身。BFGS 更新为
+固定乘子是为了主要捕捉变量移动带来的曲率。BFGS 为
 
 $$
 B_{k+1}=B_k-\frac{B_ks_ks_k^TB_k}{s_k^TB_ks_k}
 +\frac{y_ky_k^T}{s_k^Ty_k}.
 $$
 
-当 $B_k\succ0$ 且 $s_k^Ty_k>0$ 时保持正定。约束问题中这一曲率条件可能失败，应阻尼、跳过更新或重置。
+当 $B_k\succ0$ 且 $s_k^Ty_k>0$ 时保持正定。曲率条件失效或分母太小时，应阻尼、跳过或重置；大规模问题可以采用 L-BFGS。正定 BFGS 便于求凸 QP，但不能据此证明真实二阶条件成立。
 
-一种 Powell 阻尼取 $0<\eta_B<1$：若 $s^Ty<\eta_Bs^TBs$，令
+## 8. 第一篇速查
+
+| 组件 | 回答的问题 |
+| --- | --- |
+| $J_c$ | 变量移动让约束一阶改变多少？ |
+| QP | 如何兼顾局部目标曲率和线性约束？ |
+| QP KKT | 如何联立求方向和新的乘子估计？ |
+| KKT–Newton | 为什么 QP 是原一阶条件的局部解法？ |
+| Globalization | 候选方向可以走多远、能否被接受？ |
+
+**不要误读**：完整步不一定可行；QP 乘子不等于乘子增量；$B_k$ 不只是 $\nabla^2f$；KKT 矩阵不因 $B_k$ 正定就整体正定。
+
+下一篇用可行曲线和三次约束实例解释：为什么真正的二阶结构是 $\nabla^2_{xx}L$，以及如何只在允许的方向上观察它。
+
+
+---
+
+# SQP 的二阶结构：Lagrangian Hessian、Reduced Hessian 与步分解
+
+> **核心结论**：约束最优点的曲率应沿可行流形观察。Lagrangian Hessian 把约束弯曲的影响计入；reduced Hessian 把这个曲率限制到允许运动的切空间。
+
+本文接续第一篇，采用 $L=f+\lambda^Tc+\mu^Tg$。以下几何推导主要针对正则等式约束；不等式的二阶条件最后单独说明。
+
+## 1. $B_k$ 的来源与更新次序
+
+对 $x$ 求二阶导时固定乘子：
 
 $$
-\theta=\frac{(1-\eta_B)s^TBs}{s^TBs-s^Ty},\qquad
-\bar y=\theta y+(1-\theta)Bs,
+\nabla^2_{xx}L=\nabla^2f+\sum_i\lambda_i\nabla^2c_i+\sum_j\mu_j\nabla^2g_j.
 $$
 
-否则 $\bar y=y$；用 $\bar y$ 更新，并检查分母与数值尺度。
+Exact SQP 取该矩阵，quasi-Newton 用它的近似。乘子把约束曲率的影响加权到优化模型中，但 QP 约束本身仍是线性的。
 
-| 方法 | 曲率信息 | 主要注意点 |
-| --- | --- | --- |
-| Exact | 真实 $\nabla^2_{xx}L$ | 二阶导成本、负曲率、正则化 |
-| BFGS | 梯度差、secant 近似 | 固定乘子构造 $y$，阻尼与重置 |
-| Reduced BFGS | 只近似切空间曲率 | 基底随迭代改变，需要一致的坐标处理 |
+迭代的因果次序是：先用当前 $(x_k,\lambda_k,\mu_k)$ 构造 $B_k$，再解 QP 得到方向与新乘子估计；接受步骤后得到新点和乘子，下一轮才构造 $B_{k+1}$。KKT 系统不是在这一轮“凭空解出 $B_k$”。
 
-正定 BFGS 便于产生凸 QP，但它不能作为“真实二阶条件成立”的证据。
+## 2. 为什么不是只用 $\nabla^2f$？
 
-## 6. 三次约束：一次完整的局部模型计算
-
-**补充教学例**：在三次曲线 $y=x^3$ 上最小化
+在一个等式 KKT 点 $x_*$ 取可行曲线 $x(t)$，满足 $c(x(t))=0$。设 $v=x'(0)$、$a=x''(0)$。对约束求一次导数：
 
 $$
-f(x,y)=\tfrac12[(x-1)^2+(y-1)^2],\qquad c(x,y)=y-x^3=0.
+A_*v=0.
 $$
 
-目标 Hessian 是 $I$；约束的信息是
+对第 $i$ 个约束再求一次导数：
 
 $$
-J_c(x,y)=\begin{bmatrix}-3x^2&1\end{bmatrix},\qquad
-\nabla^2c(x,y)=\begin{bmatrix}-6x&0\\0&0\end{bmatrix}.
+\nabla c_i^Ta+v^T\nabla^2c_iv=0.
+$$
+
+目标沿曲线的二阶导为
+
+$$
+\frac{d^2}{dt^2}f(x(t))\bigg|_0=v^T\nabla^2fv+\nabla f^Ta.
+$$
+
+第二项是曲线转弯的贡献。由 KKT 的 $\nabla f=-A_*^T\lambda_*$，得到
+
+$$
+\nabla f^Ta=\sum_i\lambda_{*,i}v^T\nabla^2c_iv,
 $$
 
 因此
 
 $$
-\nabla^2_{xx}L=\begin{bmatrix}1-6\lambda x&0\\0&1\end{bmatrix}.
+\boxed{\frac{d^2}{dt^2}f(x(t))\bigg|_0=v^T\nabla^2_{xx}L_*v.}
 $$
 
-### 6.1 在一个不可行点构造 QP
+这个推导使用了 KKT stationarity；不能对任意点、任意乘子直接宣称二者相等。$\nabla^2f$ 只描述直线方向的曲率，忽略了保持可行时路径必须转弯的影响。
 
-取 $(x_k,y_k)=(1,0)$、$\lambda_k=-1/6$。则
+## 3. 三次约束实例：两轮 exact SQP
 
-$$
-c_k=-1,\quad q_k=\begin{bmatrix}0\\-1\end{bmatrix},\quad
-A_k=\begin{bmatrix}-3&1\end{bmatrix},\quad B_k=\begin{bmatrix}2&0\\0&1\end{bmatrix}.
-$$
-
-设 $d=(u,v)$，QP 为
+采用原学习总结中的例子：
 
 $$
-\min_{u,v}\ -v+u^2+\tfrac12v^2,\qquad -1-3u+v=0.
+f(x,y)=(x-2)^2+(y-1)^2,\qquad c(x,y)=x^3+y-1=0.
 $$
 
-代入 $v=1+3u$，目标化为 $-1/2+(11/2)u^2$。故 $d_k=(0,1)$，QP 乘子为 $0$；完整步到达 $(1,1)$，这是 $f=0$ 的全局最小点。
-
-这次恰好沿 $y$ 修正，非线性约束也精确满足。一般方向没有这个幸运：
+各导数为
 
 $$
-c(x+u,y+v)=c(x,y)-3x^2u+v-3xu^2-u^3.
+q=\begin{bmatrix}2(x-2)\\2(y-1)\end{bmatrix},\quad
+A=\begin{bmatrix}3x^2&1\end{bmatrix},\quad
+\nabla^2c=\begin{bmatrix}6x&0\\0&0\end{bmatrix},
 $$
 
-QP 只消掉前三项，留下 $-3xu^2-u^3$。这直接展示了 SOC 为什么有用。
-
-### 6.2 切方向与约束曲率
-
-在可行点 $(a,a^3)$，可以取 null-space 基底
-
 $$
-Z=\begin{bmatrix}1\\3a^2\end{bmatrix},\qquad J_cZ=0.
+B=\nabla^2_{xx}L=\begin{bmatrix}2+6\lambda x&0\\0&2\end{bmatrix}.
 $$
 
-沿该基底的 reduced Hessian 为
+### 3.1 第一轮
+
+从 $(x_0,y_0)=(1,0)$、$\lambda_0=0$ 开始。此时可行，$q_0=(-2,-2)^T$、$A_0=(3,1)$、$B_0=2I$。
 
 $$
-Z^T\nabla^2_{xx}LZ=1-6\lambda a+9a^4.
+\min_{u,v}\ -2u-2v+u^2+v^2,\qquad 3u+v=0.
 $$
 
-若只用 $\nabla^2f=I$，会漏掉 $-6\lambda a$。基底不必归一化，但比较特征值大小时要注意基底尺度；正定性在可逆换基下不变。
-
-## 7. Reduced Hessian、null-space 与二阶条件
-
-### 7.1 为什么投影到 null-space？
-
-等式正则点的允许一阶方向满足 $Av=0$。若 $Z\in\mathbb R^{n\times(n-m)}$ 的列张成 $\ker A$，则 $v=Zp$，
+KKT 方程为
 
 $$
-v^TBv=p^T(Z^TBZ)p.
+2u+3\widehat\lambda_0=2,\quad 2v+\widehat\lambda_0=2,\quad 3u+v=0.
 $$
 
-$Z^TBZ$ 是 reduced Hessian。等式问题在 LICQ 和 KKT 下，若
+解得 $d_0=(-0.2,0.6)^T$、$\widehat\lambda_0=0.8$。为演示局部模型，先假定接受完整步和完整乘子更新：
 
 $$
-Z^T\nabla^2_{xx}L_*Z\succ0,
+(x_1,y_1)=(0.8,0.6),\qquad \lambda_1=0.8,\qquad c_1=0.112.
 $$
 
-则满足严格局部极小的二阶充分条件。完整 Hessian 不必在整个空间正定；真正关心的是可行切方向上的曲率。
+完整步破坏了真实约束，尽管它满足线性化约束。实际求解时必须经过第三、四篇的接受测试；这里的完整步不是对所有算法都必然成立的结论。
 
-不等式问题的二阶条件应在 **临界锥（critical cone）** 上检查。只有在合适的活跃集、严格互补等条件下，才可简化为活跃约束 Jacobian 的 null-space 检查。
+### 3.2 第二轮
 
-### 7.2 Null-space 解 QP
+现在
 
-先找 $d_N$ 满足 $Ad_N=-c$，再写 $d=d_N+Zp$。于是
+$$
+q_1=\begin{bmatrix}-2.4\\-0.8\end{bmatrix},\quad A_1=\begin{bmatrix}1.92&1\end{bmatrix},\quad B_1=\begin{bmatrix}5.84&0\\0&2\end{bmatrix}.
+$$
+
+第二轮系统为
+
+$$
+\begin{bmatrix}5.84&0&1.92\\0&2&1\\1.92&1&0\end{bmatrix}
+\begin{bmatrix}u\\v\\\widehat\lambda_1\end{bmatrix}
+=\begin{bmatrix}2.4\\0.8\\-0.112\end{bmatrix}.
+$$
+
+数值解为
+
+$$
+d_1\approx\begin{bmatrix}0.032840882\\-0.175054493\end{bmatrix},\qquad \widehat\lambda_1\approx1.150108985.
+$$
+
+再假定接受完整步，有
+
+$$
+(x_2,y_2)\approx(0.832840882,0.424945507),\qquad c_2\approx0.002623876,
+$$
+
+$$
+B_2\approx\begin{bmatrix}7.747146687&0\\0&2\end{bmatrix}.
+$$
+
+这两轮数值已按同一 KKT 系统复算。不要把第 $k$ 轮 QP 的乘子下标与迭代更新后的乘子下标混用。
+
+| 迭代点 | $(x_k,y_k)$ | 当前乘子 | 真实约束残差 |
+| --- | --- | --- | --- |
+| $k=0$ | $(1,0)$ | $0$ | $0$ |
+| $k=1$ | $(0.8,0.6)$ | $0.8$ | $0.112$ |
+| $k=2$ | $(0.832840882,0.424945507)$ | $1.150108985$ | $0.002623876$ |
+
+## 4. 用消去约束验证曲率
+
+由 $y=1-x^3$，目标变成
+
+$$
+\phi(x)=(x-2)^2+x^6,\qquad \phi''(x)=2+30x^4.
+$$
+
+选择切向基底
+
+$$
+Z=\begin{bmatrix}1\\-3x^2\end{bmatrix},\qquad AZ=0.
+$$
+
+在 KKT 点，$y$ 方向 stationarity 给出 $\lambda=2x^3$，于是
+
+$$
+Z^T\nabla^2_{xx}LZ=2+6\lambda x+18x^4=2+30x^4=\phi''(x).
+$$
+
+只用 $\nabla^2f=2I$ 会得到 $2+18x^4$，漏掉约束曲率贡献 $12x^4$。
+
+**适用边界**：上式在采用对应乘子关系时成立；任意迭代乘子不一定满足该关系。消元变量 $x$ 也不是弧长，因此曲率的数值依赖参数化，但二阶正性仍有清楚意义。
+
+此外 $\phi''(x)>0$ 对所有实数成立，所以消元后的目标严格凸；这个特例有唯一全局最小点。一般非凸 NLP 没有这一保证。
+
+## 5. Reduced Hessian：只看允许的方向
+
+在等式正则点，$Z\in\mathbb R^{n\times(n-m)}$ 的列张成 $\ker A$，任意切方向为 $v=Zp$。于是
+
+$$
+v^TBv=p^T(Z^TBZ)p,\qquad H_R=Z^TBZ.
+$$
+
+在等式 KKT 点、LICQ 和适当光滑性下，真实矩阵满足
+
+$$
+Z^T\nabla^2_{xx}L_*Z\succ0
+$$
+
+是严格局部极小的二阶充分条件。完整 Hessian 在约束禁止的方向上有负曲率，并不自动否定约束极小性。基底可以不正交；改变基底会改变数值表示，但可逆换基不改变正定性。
+
+## 6. Null-space 解法与 normal / tangential step
+
+若当前点可行，令 $d=Zp$，等式 QP 简化为
+
+$$
+(Z^TBZ)p=-Z^Tq.
+$$
+
+若当前点不可行，先取 $d_N$ 满足 $Ad_N=-c$，再写 $d=d_N+Zp$：
 
 $$
 (Z^TBZ)p=-Z^T(q+Bd_N).
 $$
 
-这把约束 QP 的自由度压缩到 $n-m$ 维。若 $A$ 满行秩且 $Z^TBZ\succ0$，等式 QP 有唯一最小解，KKT 矩阵也非奇异。
+这与完整 KKT 系统在相应非奇异条件下等价。求解时用线性求解、QR 或 SVD，不需要显式求逆。
 
-## 8. Normal / tangential step
-
-### 8.1 两个职责
-
-写成 $d=d_N+d_T$：normal step 主要降低线性化约束残差，tangential step 主要利用余下自由度改善目标。
-
-等式满行秩时，最小范数 normal step 为
+满行秩时，最小范数 normal step 可以写成
 
 $$
-d_N=-A^T(AA^T)^{-1}c.
+d_N=-A^T(AA^T)^{-1}c,
 $$
 
-实际计算用 QR、SVD 或线性求解，避免显式形成逆矩阵。Tangential step 满足 $Ad_T=0$，并求解
+其职责是修复一阶可行性；tangential step $d_T=Zp$ 满足 $Ad_T=0$，利用剩余自由度改善优化模型。
+
+远离解时，normal step 可能只能部分修复残差，例如在信赖域里解 $\min\|c+Ad_N\|_2^2/2$。切向步还要遵守总步长预算。该分解是几何和算法工具，不要求所有 SQP 实现都显式分两次求解。
+
+## 7. KKT 残差与二阶判别不是一回事
+
+考虑 $\min x$，约束 $x^2+y^2=1$。在 $(1,0)$ 取 $\lambda=-1/2$，有 $c=0$、$\nabla_xL=0$，却是最大点。取 $Z=(0,1)^T$，有
 
 $$
-\min_{d_T}\ (q+Bd_N)^Td_T+\tfrac12d_T^TBd_T,\qquad Ad_T=0.
+Z^T\nabla^2LZ=-1.
 $$
 
-### 8.2 远离可行域时
+在 $(-1,0)$，乘子为 $1/2$，reduced Hessian 为 $1$，才是极小点。
 
-在信赖域方法中，normal step 常改为
+> **核心结论**：可行残差小说明近似可行，stationarity 残差小说明近似一阶驻定；真正的切向曲率用于区分局部性质。即使满足局部极小条件，也不保证一般非凸问题的全局最优。
 
-$$
-\min_{\|d_N\|\le\Delta_N}\ \tfrac12\|c+Ad_N\|_2^2.
-$$
+对不等式，二阶条件应在**临界锥**上检查；弱活跃约束不能一律当作等式。只有在适当的活跃集与严格互补等条件下，才可简化为活跃约束 Jacobian 的 null-space 检查。
 
-这允许只做部分可行性修复，再用切向步完成优化。Tangential step 还须遵守总步长预算。对不等式，需要结合活跃集或 slack 变量；不能把所有不等式都当作必须满足等号的约束。
-
-> **核心结论**：normal / tangential 是一种几何和算法分工，不是所有 SQP 实现都必须显式求两个独立子问题。
-
-## 9. Globalization 与 merit function
-
-### 9.1 为什么不能一直走完整步？
-
-局部模型只在附近准确。远离解时，完整步可能使非线性约束恶化、目标上升或进入模型失真的区域。Globalization 用线搜索或信赖域控制这一风险。
-
-这里“global convergence”通常指从较广的初始点范围建立到驻点等的收敛性质，**不是保证找到全局最优解**。
-
-### 9.2 Merit：把两个目标合成一个标量
-
-常用 $\ell_1$ 精确罚函数：
+## 8. 第二篇速查
 
 $$
-\phi_\rho(x)=f(x)+\rho h(x),\qquad \rho>0.
+B\approx\nabla^2_{xx}L,\qquad AZ=0,\qquad H_R=Z^TBZ,\qquad d=d_N+Zp.
 $$
 
-沿方向要求 Armijo：
+**常见误区**：把 $B$ 当成只含目标的 Hessian；把近似 BFGS 的正定性当成真实二阶证明；在不可行点只走 $Zp$；把 stationarity 当成全局最优；忽略曲线推导里的 KKT 前提。
+
+下一篇讨论：局部模型给了一个方向后，如何决定接受、缩步、修正或恢复可行性。
+
+
+---
+
+# Filter-SQP：接受规则、Switching、SOC 与 Restoration
+
+> **核心结论**：SQP 负责产生局部候选方向；globalization 负责检验这一步是否取得可靠进展。Filter 分开管理目标值与违反度，switching 决定何时必须要求目标充分下降。
+
+第一、二篇解释了 QP 与约束曲率。本篇把局部模型接到真实非线性问题上，最后给出接受流程。下一篇再把同一思路连接到 Funnel。
+
+## 1. 方向算出来，为什么还不能直接走？
+
+QP 中 $c_k+A_kd=0$，真实残差却可能是 $O(\|d\|^2)$；目标的实际变化也未必符合局部模型。远离解时，完整步尤其可能走入模型失真的区域。
+
+这里要区分两种分工：
+
+| 分工 | 代表方法 | 作用 |
+| --- | --- | --- |
+| 接受策略 | Merit、Filter、Funnel | 定义什么叫足够进展 |
+| 步骤控制 | Line search、Trust region | 拒绝后缩步或重算局部步骤 |
+
+线搜索试 $x_k+\alpha d_k$，逐渐缩小 $\alpha$；信赖域限制 $\|d\|\le\Delta$，拒绝后通常缩小半径并重新求子问题。不能简单把“缩信赖域”写成“沿同一个方向缩 $\alpha$”。
+
+“Global convergence”通常指从较广起点范围获得到驻点等的收敛性质，不是寻找全局最小值的保证。
+
+## 2. 先统一违反度
+
+一般约束可取
 
 $$
-\phi_\rho(x_k+\alpha d_k)
-\le\phi_\rho(x_k)+\sigma\alpha\phi_\rho'(x_k;d_k),\qquad 0<\sigma<1.
+h(x)=\|c(x)\|_1+\|[g(x)]_+\|_1,\qquad [g]_j^+=\max(g_j,0).
 $$
 
-因为 $h$ 不光滑，这里是单侧方向导数。只有方向导数为负时，该式才要求下降；否则需调整罚参数或修复方向。
+$h\ge0$，且 $h=0$ 等价于原始可行。其他论文可能用二范数、平方残差或记号 $\theta$；比较阈值时必须先确认定义和缩放。
 
-等式 QP 满足 $Ad=-c$ 时，$\|c\|_1$ 的方向导数是 $-\|c\|_1$。在适当条件下，罚参数大于解处乘子的相应对偶范数，可体现局部“精确罚”性质；但参数过大容易让优化被可行性项压住。
+## 3. Merit function：兑换成一个标量
 
-## 10. Filter-SQP：接受区域与历史更新
+传统 $\ell_1$ merit 为
 
-### 10.1 Filter 保存什么？
+$$
+\Phi_\rho(x)=f(x)+\rho h(x),\qquad \rho>0.
+$$
 
-保存若干历史 pair：$\mathcal F=\{(h_i,f_i)\}$。低 $h$、低 $f$ 都更好。候选点必须对**每一个** filter 条目至少在一个维度取得带余量的改善，例如
+沿一个 merit 下降方向检查
+
+$$
+\Phi_\rho(x_k+\alpha d)\le\Phi_\rho(x_k)+\sigma\alpha\Phi_\rho'(x_k;d),\quad 0<\sigma<1.
+$$
+
+$h$ 不光滑，所以这里使用单侧方向导数；若导数不为负，就不能把右边当作充分下降要求，应先调整罚参数或方向。
+
+等式 QP 满足 $Ad=-c$ 时，$\|c\|_1$ 的方向导数是 $-\|c\|_1$，所以罚项能抵消某些目标上升。在适当正则条件下，超过解处乘子相应对偶范数的参数可产生局部精确罚性质；但过大又可能过分压制目标优化。
+
+> **直觉**：Merit 把“目标改善”和“可行性改善”兑换成同一种货币；罚参数就是兑换率。
+
+## 4. Filter：同时看两个坐标
+
+Filter 保存历史 pair：
+
+$$
+\mathcal F=\{(h_i,f_i)\}.
+$$
+
+低 $h$、低 $f$ 都更好。候选点对每个条目至少满足一条带余量的改善条件，例如
 
 $$
 \forall(h_i,f_i)\in\mathcal F:\quad
-h_t\le(1-\gamma_h)h_i\quad\text{或}\quad
-f_t\le f_i-\gamma_fh_i.
+h_t\le(1-\gamma_h)h_i\quad\text{或}\quad f_t\le f_i-\gamma_fh_i,
 $$
 
-其中 $0<\gamma_h<1$、$\gamma_f>0$。这里的“或”在每个条目内部成立；不是找到任意一个条目可以改善就通过。
+其中 $0<\gamma_h<1$、$\gamma_f>0$。
 
-若新 pair 两个坐标都不比某条目更大，则新 pair 支配该条目，后者可删除。加入历史点使算法不容易反复回到已经取得过的较差折中。
+逻辑是“**对每个历史条目，至少改善一维**”，不是“找到一个条目能改善就算通过”。如果新 pair 两坐标都不大于某旧 pair，则旧 pair 被支配，可删除。
 
-### 10.2 只有 filter 检查够吗？
+### 4.1 一个可直接判断的数字例子
 
-不够。还要与当前点比较、设置违反度上限，并用 switching 和目标充分下降条件防止接近可行域时只靠微小的约束改善停滞。
+设 filter 只有 $(h_i,f_i)=(0.5,10)$，$\gamma_h=0.1$、$\gamma_f=0.2$。候选点需满足 $h_t\le0.45$ 或 $f_t\le9.9$。
 
-> **核心结论**：filter 允许目标暂时上升，也允许违反度暂时上升，但两者不是任意上升。它管理的是经过余量保护的历史接受区域。[Filter line-search 的原始分析](https://doi.org/10.1137/S1052623403426544)
+| 候选 $(h_t,f_t)$ | 对这个条目的判断 | 原因 |
+| --- | --- | --- |
+| $(0.40,10.4)$ | 通过 | 可行性改善足够，允许目标上升 |
+| $(0.60,9.8)$ | 通过 | 目标改善足够，允许违反度上升 |
+| $(0.48,9.95)$ | 不通过 | 两项虽然都略有改善，却达不到余量 |
+| $(0.55,10.1)$ | 不通过 | 两方面都变差 |
 
-## 11. f-type、h-type 与 switching condition
+这只是历史 filter 测试，最终接受还需要违反度上限、与当前点的进展检查以及可能触发的目标 Armijo 条件。
 
-### 11.1 步类型是验收职责
+## 5. f-type 与 h-type：谁来证明这一步有价值？
 
-- **f-type**：方向预测了值得追求的目标下降，必须验证真实目标充分下降。
-- **h-type**：没有进入上述目标下降分支，靠 filter 或可行性规则取得接受，目标可以上升。
+**f-type** 是按目标下降验收的步骤；**h-type** 是未进入该分支、按 filter 或可行性规则验收的步骤。
 
-在某些 filter 算法中，h-type 的逻辑是“非 f-type 的 filter 接受步”，不一定严格等价于 $h_{k+1}<h_k$。名称是帮助理解职责，最终以接受条件为准。
+例如 $(f,h):(10,0.5)\to(10.4,0.05)$ 可以通过显著可行性改善获得接受。目标上升不自动代表失败。
 
-例如 $(f,h):(10,0.5)\to(10.4,0.05)$ 可作为可行性进展；若 $h\approx10^{-7}$，只改善一点 $h$ 而完全不改善最优性，就不能长期满足算法的收敛需求。
+但如果 $h\approx10^{-7}$，算法不能长期只依赖极微小的可行性改善而忽略 stationarity。此时需要一个机制要求真正的目标进展。
 
-### 11.2 简化的模型下降 switching
+**严格一点的理解**：某些 filter 算法里的 h-type 是“非 f-type 的可接受步”，不一定每步都严格降低 $h$。类型由算法条件决定，不由名称或事后看到的单个数值决定。
 
-定义 SQP 局部模型下降：
+## 6. Switching condition：何时转向目标优化？
+
+教学上可定义二次模型下降
 
 $$
-\Delta m_k(d)=-q_k^Td-\tfrac12d^TB_kd.
+\Delta m_k(d)=-q_k^Td-\tfrac12d^TB_kd,
 $$
 
-它是局部 QP 模型的预测量；因 $B_k$ 含约束曲率，不能把它当作真实 $f$ 的精确 Taylor 下降。一种教学规则是
+再比较 $\Delta m_k(d_k)>0$ 且 $\Delta m_k(d_k)\ge\delta h_k^2$。违反度小时阈值小，算法更容易进入 f-type。
 
-$$
-\Delta m_k(d_k)>0,\qquad \Delta m_k(d_k)\ge\delta h_k^2.
-$$
+不过 $B_k$ 含约束曲率，该量是 QP 模型下降，不是实际目标下降，也不必等于真实 $f$ 的二阶 Taylor 预测。指数 $2$ 更不是所有算法的统一标准。
 
-$h$ 小时阈值小，算法更容易要求目标下降。指数 $2$ 和参数并非所有 filter / funnel 方法的统一标准。
+### 6.1 与线搜索 Armijo 一致的一种规则
 
-### 11.3 本笔记伪代码采用的线搜索规则
-
-为让方向导数和 Armijo 一致，定义 $D_k=-q_k^Td_k$。Filter 分支采用一种 Wächter–Biegler 风格的规则：
+令 $D_k=-q_k^Td_k$。本系列完整伪代码采用以下 filter 教学规则：
 
 $$
 h_k\le h_{\min},\qquad D_k>0,\qquad
 \alpha D_k^{s_f}>\delta h_k^{s_h}.
 $$
 
-触发时用
+触发时要求
 
 $$
-f(x_k+\alpha d_k)\le f_k-\sigma\alpha D_k.
+f_t\le f_k-\sigma\alpha D_k.
 $$
 
-例如 $f_k=10$、$D_k=2$、$\sigma=0.1$、$\alpha=1$，则要求 $f_t\le9.8$；$9.99$ 虽下降，却不够。
+因为 $D_k>0$，右边严格低于 $f_k$。如 $f_k=10$、$D_k=2$、$\alpha=1$、$\sigma=0.1$，要求 $f_t\le9.8$；$9.99$ 虽下降，却不充分。
 
-未触发时采用与当前点的 filter 式进展检查。具体论文还可能对指数、阈值和 filter 更新施加额外要求。IPOPT 是采用 filter 的**内点算法**，不能把它整体称为经典 SQP；这里借用其接受逻辑帮助阅读。[Wächter–Biegler 算法说明](https://doi.org/10.1007/s10107-004-0559-y)
+未触发时，仍须对当前点满足 filter 式进展，例如 $h_t\le(1-\gamma_h)h_k$ 或 $f_t\le f_k-\gamma_fh_k$。
 
-### 11.4 历史更新的一个明确约定
+这类方向导数规则帮助理解 Wächter–Biegler 的 filter line-search 思路；具体阈值、指数及其他保护条件应按所读算法确定。IPOPT 的算法本体是内点法，不能因为它使用 filter 就整体称为经典 SQP。[算法说明](https://doi.org/10.1007/s10107-004-0559-y)
 
-本笔记在 h-type 接受后，把**接受前当前点** $(h_k,f_k)$ 插入 filter，删除被该 pair 支配的旧条目；f-type 不插入。不同论文可能采用移动后的点或其他更新时机，应连同接受规则整体阅读。
+## 7. Filter 更新：不是接受每个点都插入
 
-## 12. SOC 与 Maratos effect
+本系列约定：h-type 接受后，把**接受前的当前点** $(h_k,f_k)$ 插入 filter，删除被它支配的条目；f-type 不插入。
 
-### 12.1 线性可行不等于非线性可行
+这样 h-type 的折中成果成为以后必须尊重的历史边界。不同算法可能改变插入点和时机，阅读论文时应把更新规则与接受条件作为一个整体，而不是只复制一条不等式。
 
-若 $c_k+Ad=0$，仍可能有
+## 8. Maratos effect：好的 Newton 步也可能被拒绝
 
-$$
-c(x_k+d)=O(\|d\|^2).
-$$
-
-Maratos effect 指解附近本来适合快速收敛的完整 SQP 步，因为这些二阶约束误差而被 merit / 接受规则拒绝；反复缩步会妨碍预期的快速局部收敛。
-
-### 12.2 Second-order correction
-
-在完整步 $x_t=x_k+d$ 被约束误差阻挡时，求一个小修正 $w$：
+以单条等式为例，若约束有足够光滑性，
 
 $$
-A_kw\approx-c(x_t),\qquad x_{\mathrm{soc}}=x_k+d+w.
+c(x_k+d)=c_k+A_kd+\tfrac12d^T\nabla^2c_kd+O(\|d\|^3).
 $$
 
-也可用更新后的 Jacobian；在正则情形下 $w=O(\|d\|^2)$。修正后仍须重新检查真实函数值和约束值。处理不等式时主要修正有关活跃约束，并验证所有不等式。
+QP 消掉前两项，却留下二阶残差。在解附近，这种残差仍可能使一个本来适合快速局部收敛的完整步被接受策略拒绝，从而反复缩步，妨碍预期的超线性或二次收敛。
 
-### 12.3 单位圆上的直观例子
+这叫 Maratos effect。不是所有完整步拒绝都属于它：方向错误、曲率不可靠或远离解也会导致拒绝。[Filter 局部收敛与 SOC 分析](https://doi.org/10.1137/S1052623403426544)
 
-在 $(1,0)$、约束 $x^2+y^2-1=0$ 上，切向步 $d=(0,t)$ 满足 $Ad=0$，却产生残差 $t^2$。取 $w=(-t^2/2,0)$，有
+## 9. SOC：修正二阶约束误差
+
+对完整候选 $x_t=x_k+d_k$，求小修正 $w$：
+
+$$
+A_kw\approx-c(x_t),\qquad x_{\mathrm{soc}}=x_k+d_k+w.
+$$
+
+在正则、局部适用条件下，$w=O(\|d_k\|^2)$，所以主要修补误差而不替代原 Newton 方向。也可采用更新后的 Jacobian；有不等式时要考虑相关活跃约束并验证其余约束。
+
+单位圆上，从 $(1,0)$ 沿 $d=(0,t)$ 移动，残差是 $t^2$。取 $w=(-t^2/2,0)$ 后
 
 $$
 c(1-t^2/2,t)=t^4/4.
 $$
 
-一个二阶小修正将违反度从二阶降为四阶。实际最优化中的 Maratos effect 还涉及目标和接受测试；此例只展示约束修正机制。
+它展示误差从二阶降到四阶的机制；真正的 Maratos 判断还要结合目标和接受规则。SOC 候选仍需检查真实函数值，次数与大小要受限，不能未经测试自动接受。
 
-> **核心结论**：SOC 是对一个已有好方向的小修补，不是另一次完整优化；它不保证一定可接受，也不是每次回溯都必须调用。
+## 10. Restoration：正常优化失效后先恢复可行性
 
-## 13. Restoration phase
+当线性化约束不相容、QP 失败且无法修复，或缩到最小步长仍找不到可接受点时，进入 restoration。
 
-### 13.1 什么时候进入？
-
-线性化约束不相容、QP 求解失败且修正无效，或回溯到最小步长仍无法接受时，可以进入 restoration。QP 失败也可能来自数值病态、无界或求解器问题，应先辨别原因。
-
-等式违反度子问题常取
+例如优先求解
 
 $$
-\min_x\ v(x)=\tfrac12\|c(x)\|_2^2,
+\min_x\ \tfrac12\|c(x)\|_2^2+\tfrac12\|[g(x)]_+\|_2^2,
 $$
 
-一般约束可加入 $\tfrac12\|[g(x)]_+\|_2^2$，也可用 slack / elastic 变量、邻近项或信赖域。
+也可以采用 elastic/slack 子问题、邻近项或信赖域。暂时把重点从原目标移到违反度，但退出必须满足主算法的重返条件，不能只凭“$h$ 降了一点”就返回。
 
-### 13.2 退出并不是“$h$ 降了就回去”
+返回后重新估计乘子，并按规则修复或重置 Hessian 近似。如果停在 $h>0$ 的违反度驻点，应报告恢复失败或不可行驻点；这本身不证明原问题全局无可行解。
 
-必须满足主算法的重返条件：例如获得足够可行性进展，且新点能通过 filter 或进入 funnel；还要能够重新构造可用的主问题步骤。Restoration 后乘子应重新估计，Hessian 近似应按规则重置或修复。
+Normal step 是正常迭代内部的一阶修复分量；restoration 是正常步骤失效后的独立阶段，两者不能互换名称。
 
-若 restoration 停在 $h>0$ 的驻点，只能报告恢复失败或不可行驻点等状态，**不能仅凭它断言原问题无可行解**。
+## 11. 接受流程与第三篇速查
 
-> **核心结论**：restoration 是优先恢复可行性的独立阶段；normal step 是正常步骤内部的组成部分，二者不是同义词。
+```text
+QP 方向 → 完整候选
+  → 是否满足违反度上限与历史 filter？
+  → switching 是否触发？
+      f-type：还要目标 Armijo 充分下降
+      h-type：还要对当前点取得允许的进展
+  → 通过：接受并按类型更新历史
+  → 不通过：合适时尝试 SOC，否则缩步
+  → 反复失败：restoration，成功后重返主算法
+```
 
-## 14. Funnel 方法
+**不要误读**：filter 通过不是完整接受测试；h-type 不保证 $h$ 每步单调下降；缩步不自动解决不相容 QP；SOC 不保证可接受；restoration 失败不等于全局不可行；switching 不是逃离局部最优的搜索机制。
 
-### 14.1 从二维历史到一个违反度上界
+下一篇用一个标量上界替代二维历史，解释 Funnel，并把四篇内容汇成完整 SQP 伪代码。
 
-维护 funnel width $\tau_k$，并保证
+
+---
+
+# Funnel 与完整 SQP：漏斗边界、恢复机制与复习速查
+
+> **核心结论**：Funnel 维护允许的最大违反度 $\tau_k$，并逐步收紧它。在边界内仍须证明目标或可行性进展；$\tau_k$ 单调不增，不代表 $h_k$ 每步单调下降。
+
+本篇承接 Filter 的步类型与 switching，再给出可逐行复习的 SQP 教学框架。不同文献的接受条件并不完全相同，下面会固定预测量和更新约定，避免混用。
+
+## 1. 从历史边界到漏斗上界
+
+Filter 保存多个 $(h_i,f_i)$；Funnel 主要维护一个违反度上界：
 
 $$
 h(x_k)\le\tau_k,\qquad \tau_{k+1}\le\tau_k.
 $$
 
-候选点首先必须处于漏斗内。Funnel 边界只是资格条件，还要检查目标下降或可行性进展。下面给出与原讨论相近的教学规则；完整算法的收敛依赖 switching、目标有界和恢复机制等额外条件，单调 $\tau$ 本身不保证 $h\to0$。[统一 funnel restoration SQP 框架](https://arxiv.org/abs/2409.09208)
+在 $(h,f)$ 平面上，$h>\tau_k$ 的点位于允许区之外。位于边界内只是有资格接受，还要检查相应充分下降条件。
 
-### 14.2 f-type 与 h-type
+漏斗宽度单调本身不保证 $h\to0$：它可能收敛到正数。完整收敛分析还依赖 switching、目标有界、恢复机制与子问题性质等条件。[统一 funnel restoration SQP 框架](https://arxiv.org/abs/2409.09208)
 
-模型版本可比较 $\Delta m_k$ 与 $\delta h_k^2$，要求模型下降为正。若触发 f-type 且
+## 2. 固定一个线搜索教学版本
 
-$$
-h_t\le\tau_k,\qquad f_k-f_t\ge\sigma\Delta m_k,
-$$
+为与 Armijo 一致，定义 $D_k=-q_k^Td_k$、$P_k(\alpha)=\alpha D_k$。先要求 $h_t\le\tau_k$。
 
-则接受并令 $\tau_{k+1}=\tau_k$。有些方法用线性预测下降而非二次模型，必须与实际定义一致。
-
-若未触发，则 h-type 的一种接受条件和更新为
+若
 
 $$
-h_t\le\beta\tau_k,\qquad
-\tau_{k+1}=(1-\kappa)h_t+\kappa\tau_k,
-\qquad 0<\beta,\kappa<1.
+D_k>0,\qquad P_k(\alpha)\ge\delta h_k^2,
 $$
 
-于是 $h_t\le\tau_{k+1}<\tau_k$（当 $\tau_k>0$）。它保证收窄上界，但不必保证 $h_t<h_k$。
+则按 f-type 验收：
 
-### 14.3 数值例子
+$$
+f_t\le f_k-\sigma P_k(\alpha),\qquad \tau_{k+1}=\tau_k.
+$$
 
-设 $\tau_0=1$、$h_0=0.7$，h-type 候选 $h_t=0.4$，$\beta=0.8$、$\kappa=0.5$。接受后 $\tau_1=0.7$。
+若不触发该分支，按 h-type 要求
 
-下一次 f-type 将 $h:0.4\to0.5$，仍在 $\tau_1=0.7$ 内；若目标充分下降，仍可接受，宽度保持 $0.7$。
+$$
+h_t\le\beta\tau_k,\qquad 0<\beta<1,
+$$
 
-> **核心结论**：funnel width 单调不增，约束违反度不必每一步单调不增。某些框架可把 funnel 解释成特殊 filter，但一般 funnel 算法不能不加条件地等同于“只存一个历史点的 filter”。
+接受后更新
 
-### 14.4 三种 globalization 的比较
+$$
+\tau_{k+1}=(1-\kappa)h_t+\kappa\tau_k,\qquad 0<\kappa<1.
+$$
 
-| 方法 | 保存的状态 | 核心接受依据 | 主要维护任务 |
+当 $\tau_k>0$ 时，有
+
+$$
+h_t\le\tau_{k+1}\le[\kappa+(1-\kappa)\beta]\tau_k<\tau_k.
+$$
+
+这既让新点留在更新后的漏斗内，又收窄了上界。某些论文使用二次模型下降 $\Delta m_k$、不同的违反度或其他步类型；替换时必须连同 switching、充分下降与收敛假设一起替换。
+
+## 3. 为什么允许违反度暂时上升？
+
+设 $\tau_0=1$、$h_0=0.7$，一个 h-type 候选为 $h_t=0.4$，取 $\beta=0.8$、$\kappa=0.5$，得到 $\tau_1=0.7$。
+
+下一步若 $h:0.4\to0.5$，仍满足 $h_t<0.7$；只要 f-type 的预测与实际充分下降都通过，就可接受，宽度保持 $0.7$。
+
+| 状态 | 违反度 | 漏斗宽度 | 解释 |
 | --- | --- | --- | --- |
-| Merit | 罚参数 $\rho$ | $f+\rho h$ 充分下降 | 平衡尺度、更新罚参数 |
-| Filter | 若干 $(h_i,f_i)$ | 对历史条目改善至少一维，并配合 switching | 插入、支配删除、历史测试 |
-| Funnel | 上界 $\tau_k$ | 留在边界内，配合目标下降或收窄条件 | 维护和收紧违反度上界 |
+| 初始 | $0.7$ | $1.0$ | 位于初始漏斗内 |
+| h-type 后 | $0.4$ | $0.7$ | 收窄允许边界 |
+| f-type 后 | $0.5$ | $0.7$ | 为目标改善使用边界内的余量 |
 
-三者都可以配合 SOC 和 restoration。它们管理迭代的进展，不负责在不同非凸吸引域之间搜索全局最优解。
+这里“h-type”要求相对宽度足够深入，并不严格要求比当前 $h_k$ 更小。Filter 与 Funnel 都不应只凭名称推出逐步单调性。
 
-## 15. 完整教学伪代码
+## 4. Merit / Filter / Funnel 对比
 
-### 15.1 范围与约定
+| 方法 | 主要状态 | 对候选点的要求 | 维护任务 |
+| --- | --- | --- | --- |
+| Merit | 罚参数 $\rho$ | $f+\rho h$ 充分下降 | 处理尺度与罚参数 |
+| Filter | 历史 pair 集合 | 对每个条目改善一维，配合当前点测试和 switching | 插入、删除支配条目 |
+| Funnel | 违反度上界 $\tau_k$ | 保持在边界内，再满足目标下降或收窄条件 | 保持与更新上界 |
 
-以下是**线搜索 SQP 的模块化教学框架**，覆盖成功、回溯、SOC、恢复与终止路径。它不是某个求解器的逐行复现，也不是直接运行的生产实现。Filter 使用第 11 节的方向导数规则；funnel 为保持线搜索一致，采用 $\alpha D_k$ 的线性预测版本。第 14 节的二次模型版本是另一选择，不与这里混用。
+可记成：Merit 设兑换率，Filter 记历史成绩，Funnel 设可行性边界。在某些框架中可用特殊 filter 解释 funnel，但不是任意 funnel 都等于“只存一个历史点的 filter”。
 
-参数满足 $0<\sigma,r,\beta,\kappa,\gamma_h<1$，$\delta,\gamma_f>0$。停止使用经过合理缩放的完整 NLP KKT 残差，包含 stationarity、等式、不等式违反度、乘子非负性和互补性。
+三者都可配合 SOC 与 restoration；线搜索和信赖域则提供拒绝后的步骤控制。
+
+## 5. 停止条件：要检查完整 NLP KKT
+
+采用 $g\le0$、$\mu\ge0$ 的约定，可分别检查
+
+$$
+\begin{aligned}
+r_s&=\|\nabla_xL(x,\lambda,\mu)\|_\infty,\\
+r_e&=\|c(x)\|_\infty,\qquad r_i=\|[g(x)]_+\|_\infty,\\
+r_d&=\|[-\mu]_+\|_\infty,\qquad r_c=\|\mu\odot g(x)\|_\infty.
+\end{aligned}
+$$
+
+各项达到合理缩放后的容差，才报告近似一阶 KKT 收敛。只有等式时，无需不等式对应项。$L$ 的数值本身不是 stationarity residual。
+
+例如 $f(x)=10^{-12}x^2$ 在 $x=10^5$ 时梯度仅为 $2\times10^{-7}$，可能通过宽松绝对容差；因此小残差必须结合尺度解释，不能只看打印出的科学记数法。
+
+步很小或目标变化很小只能作为停滞诊断，不能替代 KKT。小 KKT 残差也不保证局部极小，更不保证一般非凸问题的全局最优。
+
+## 6. 完整 SQP 教学伪代码
+
+这是**模块化线搜索教学框架**，不是某篇论文或生产求解器的逐行实现。Filter 固定采用第三篇的方向导数 switching；Funnel 固定采用本篇的线性预测 $\alpha D_k$。所有恢复退出、曲率修正和 SOC 大小界都须按所选完整算法具体化。
+
+参数：$0<\sigma,r,\beta,\kappa,\gamma_h<1$；$\delta,\gamma_f>0$；步长下界 $\alpha_{\min}>0$。
 
 ```text
-输入 x0, λ0, μ0 ≥ 0, B0, 容差, 迭代/时间上限
-选择 mode ∈ {MERIT, FILTER, FUNNEL}
-初始化罚参数 ρ；filter F = 空集；τ0 ≥ h(x0)
+输入：x0, λ0, μ0≥0, B0, 缩放与容差, 迭代/时间上限
+选择接受策略 mode ∈ {MERIT, FILTER, FUNNEL}
+初始化 ρ；F=空集；τ0>0 且 τ0≥h(x0)，保留边界余量
 
 for k = 0, 1, ...:
     计算 f, q=∇f, c, g, A=Jc, C=Jg
-    若完整、缩放后的 NLP KKT 残差满足容差：
-        返回“一阶 KKT 收敛”及残差（不宣称全局最优）
-    若迭代/时间达到上限：返回“达到上限”
+    若完整 NLP KKT 残差达标：
+        返回“一阶 KKT 收敛”及各项残差
+    若超过迭代/时间上限：返回“达到上限”
 
-    exact: B = ∇²xx L(xk, λk, μk)
-    quasi-Newton: 使用已有 Bk
-    必要时按所用 QP 策略修正曲率/正则化
+    exact：B=∇²xx L(xk,λk,μk)
+    quasi-Newton：使用当前 Bk
+    必要时修正曲率或正则化，适配所用 QP 求解策略
 
-    解 QP: min qᵀd + 0.5 dᵀBd
-           s.t. c+Ad=0, g+Cd≤0
+    求 QP：min qᵀd + 0.5 dᵀBd
+            s.t. c+Ad=0, g+Cd≤0
     得到 d, λhat, μhat
-    若 QP 无有效解：转 RESTORE
-    若 d 很小但 KKT 残差仍大：诊断/修复；失败则 RESTORE
+    若 QP 没有有效解：诊断并尝试修复，失败转 RESTORE
+    若 d 很小但 KKT 残差仍大：诊断停滞，必要时 RESTORE
 
-    若 MERIT：更新 ρ，确保 φρ'(xk;d)<0
-               若无法取得下降方向：RESTORE
-    D = -qᵀd；α = 1；accepted = false
+    MERIT：调整 ρ，使 φρ'(xk;d)<0
+           若无法取得下降方向：RESTORE
+    D=-qᵀd；α=1；accepted=false
 
-    while α ≥ αmin:
-        xt = xk + αd；计算 ft, ht
-        (ok, type) = ACCEPT(xt, α, D, mode)
-        若 ok：accepted = true；break
+    while α≥αmin:
+        xt=xk+αd，计算真实 ft, ht
+        (ok,type)=ACCEPT(xt,α,D,mode)
+        若 ok：accepted=true；break
 
-        若 α=1 且拒绝主要来自非线性约束偏差：
-            尝试有限次 SOC，求小修正 w
-            xsoc = xk + d + w
-            若 w 足够小且 xsoc 通过同一真实接受规则：
-                xt = xsoc；记录 SOC；accepted = true；break
-        α = r α
+        若 α=1 且拒绝主要源于二阶约束偏差：
+            尝试有限次 SOC，求足够小的 w
+            xsoc=xk+d+w
+            若 xsoc 通过同一真实接受规则：
+                xt=xsoc；记录 SOC；accepted=true；break
+        α=rα
 
     若未 accepted：转 RESTORE
 
-    若 FILTER 且 type=h：
-        向 F 插入旧点 (hk, fk)，删除被它支配的条目
-    若 FUNNEL 且 type=h：τnew=(1-κ)ht+κτk
-    若 FUNNEL 且 type=f：τnew=τk
+    FILTER 且 type=h：将旧点 (hk,fk) 插入 F，删除被支配条目
+    FUNNEL 且 type=h：τnew=(1-κ)ht+κτk
+    FUNNEL 且 type=f：τnew=τk
 
-    xnew = xt
-    选择乘子更新策略：如用 αdual∈(0,1]
-    λnew = λk + αdual(λhat-λk)
-    μnew = μk + αdual(μhat-μk)
-    或在新点重新估计乘子；保持 μnew≥0
-    若 quasi-Newton：
-        s = xnew-xk（含 SOC 的实际位移）
-        y = ∇xL(xnew,λnew,μnew)-∇xL(xk,λnew,μnew)
-        用阻尼 BFGS 更新；异常时跳过或重置
-    更新状态；continue
+    xnew=xt
+    选 αdual∈(0,1]，更新乘子估计：
+        λnew=λk+αdual(λhat-λk)
+        μnew=μk+αdual(μhat-μk)
+    或在新点重新估计乘子，保持 μnew≥0
+
+    quasi-Newton：
+        s=xnew-xk，包含 SOC 的实际位移
+        y=∇xL(xnew,λnew,μnew)-∇xL(xk,λnew,μnew)
+        检查曲率与分母，做阻尼 BFGS、跳过或重置
+    更新状态并继续
 
 RESTORE:
-    解局部违反度最小化/elastic 子问题
-    寻找具有足够违反度进展且满足主算法重返条件的 xR
+    解局部违反度最小化或 elastic 子问题
+    寻找有足够进展且满足主算法重返条件的 xR
     若成功：
-        按该算法规则维护 F 或 τ，使新点满足不变量
-        xnew=xR；重新估计乘子；重置/修复 B；continue
-    否则：返回“恢复失败/不可行驻点/数值失败”等诊断
+        按算法规则维护 F 或 τ，保证相应不变量
+        更新点、重新估计乘子、修复/重置 B，返回主迭代
+    否则：报告“恢复失败/不可行驻点/数值失败”等诊断
 ```
 
-### 15.2 接受模块
+### 6.1 接受模块
 
 ```text
-ACCEPT(xt, α, D, mode):
+ACCEPT(xt,α,D,mode):
     MERIT:
-        返回 φρ(xt) ≤ φρ(xk)+σ α φρ'(xk;d)
+        返回 φρ(xt)≤φρ(xk)+σ α φρ'(xk;d)
 
     FILTER:
         若 ht 超过允许上限：拒绝
-        若对 F 任一条目，两条改善不等式都不满足：拒绝
-        switch = (hk≤hmin 且 D>0 且 α D^sf > δ hk^sh)
+        对 F 中每个 (hi,fi)：
+            若 ht≤(1-γh)hi 与 ft≤fi-γf hi 都不成立：拒绝
+        switch=(hk≤hmin 且 D>0 且 α D^sf>δ hk^sh)
         若 switch：返回 (ft≤fk-σ αD, f)
-        否则：返回
-            (ht≤(1-γh)hk 或 ft≤fk-γf hk, h)
+        否则返回 (ht≤(1-γh)hk 或 ft≤fk-γf hk, h)
 
-    FUNNEL（线性预测的教学版本）:
+    FUNNEL:
         若 ht>τk：拒绝
-        switch = (D>0 且 αD≥δ hk²)
+        switch=(D>0 且 αD≥δ hk²)
         若 switch：返回 (ft≤fk-σ αD, f)
-        否则：返回 (ht≤βτk, h)
+        否则返回 (ht≤βτk, h)
 ```
 
-SOC 候选采用其基步的预测量并限制修正大小；有收敛证明的实现还需明确 SOC 次数、大小界和专用验收细节。Restoration 的 filter 插入及 funnel 收窄必须与所选择的论文一致，不能用“随意清空历史或放宽边界”替代。
+SOC 使用基步的预测量并限制修正大小；具体可证明算法还须明确专用验收细节。Restoration 不能靠随意清空 filter 或放宽 $\tau$ 来绕过进展要求。若 QP 非凸，不能只接受任意驻点方向。
 
-## 16. 常见误区与诊断
+## 7. 复习时最容易混淆的组件
 
-### 16.1 KKT 残差很小，目标为何仍然很高？
+| 组件 | 职责 | 不保证什么 |
+| --- | --- | --- |
+| SQP / QP | 产生局部候选方向 | 真实非线性可行、完整步可接受 |
+| Switching | 选择目标验收或其他进展分支 | 逃离局部极小、全球搜索 |
+| SOC | 修补小的二阶约束偏差 | 自动可行或自动通过验收 |
+| Restoration | 正常步骤失效时优先降低违反度 | 失败即证明全局无可行解 |
+| Reduced Hessian | 检查允许方向的曲率 | 近似矩阵正定就是真实二阶证明 |
 
-取单位圆上的问题 $\min x$，约束 $x^2+y^2=1$。
+## 8. 一页式公式速查
 
-在 $(1,0)$，取 $\lambda=-1/2$，则 $c=0$、$\nabla_xL=0$，但该点是最大点；$Z=(0,1)^T$，有 $Z^T\nabla^2LZ=-1$。
-
-在 $(-1,0)$，取 $\lambda=1/2$，则 reduced Hessian 为 $1$，目标才取得最小值 $-1$。
-
-因此残差小首先意味着近似一阶驻定和可行。病态或退化时，残差小甚至不一定意味着变量在距离上接近某个精确 KKT 点。
-
-### 16.2 复习时最容易混淆的判断
-
-| 误区 | 正确理解 |
-| --- | --- |
-| $L$ residual 就是 $|L|$ | stationarity residual 是 $\|\nabla_xL\|$ |
-| 只检查 $c$ 和 $\nabla L$ 足够 | 有不等式还要检查违反度、对偶可行与互补性 |
-| $\nabla f=0$ 才能最优 | 约束最优时梯度可由约束梯度与乘子抵消 |
-| $B$ 一定是 $\nabla^2f$ | 它近似 $\nabla^2_{xx}L$，含约束曲率 |
-| $B\succ0$ 才能是约束极小点 | 等式问题主要看切空间曲率；不等式看临界锥 |
-| QP 可行则新点一定可行 | 只保证线性化约束；仍有高阶误差 |
-| h-type 每步必须降低 $h$ | 依具体 filter / funnel 接受规则，不能只凭名称判断 |
-| 在 funnel 内就接受 | 还要满足相应充分下降条件 |
-| $\tau$ 单调即可推出 $h\to0$ | 还依赖 switching、界限和恢复等机制 |
-| Switching 能逃离局部最优 | 它管理步的验收，不是全局搜索 |
-| Restoration 失败证明问题不可行 | 可能停在局部违反度驻点或数值失败 |
-
-### 16.3 一个实用的诊断次序
-
-先检查导数和尺度，再检查完整 KKT 残差；若残差小但解不理想，检查真实 reduced Hessian / 临界锥曲率，并区分局部解和全局解。若残差不小但步长不断缩小，查看 QP 状态、预测下降、实际下降、filter / funnel 拒绝原因以及 SOC、restoration 是否正常工作。
-
-例如 $f(x)=10^{-12}x^2$ 在 $x=10^5$ 时梯度仅为 $2\times10^{-7}$，绝对容差 $10^{-6}$ 可能误判 stationarity。应结合缩放、相对尺度和问题物理含义解释数值。
-
-## 17. 网页发布与笔记维护
-
-把 Markdown 作为可编辑主版本，PDF 作为打印和固定版本。此文件使用 `$...$` 行内数学与 `$$...$$` 独立数学；网页需启用兼容的 KaTeX 或 MathJax 渲染。普通 Markdown 渲染器不一定支持数学。
-
-建议每个知识点保持三层：**它解决什么问题 → 关键公式与算法位置 → 自己曾卡住的“为什么”**。例如“为什么用 $\nabla^2L$”放在 Hessian 推导之后，比按聊天顺序保存零散问答更容易复习。
-
-发布前检查公式、矩阵换行、表格在手机上的宽度和代码块换行。保留术语、符号约定和版本说明；遇到新论文时，把该论文的 $h$ 定义、预测下降和 switching 单独记录，避免偷换符号。
-
-## 18. 一页式复习摘要
-
-### 问题与局部方向
+### 模型与方向
 
 $$
-\min f(x),\ c=0,\ g\le0;\qquad L=f+\lambda^Tc+\mu^Tg,\ \mu\ge0.
+L=f+\lambda^Tc+\mu^Tg,\quad \mu\ge0,\quad B\approx\nabla^2_{xx}L.
 $$
 
 $$
 \min_d q^Td+\tfrac12d^TBd,\qquad c+Ad=0,\quad g+Cd\le0.
 $$
 
-$A=J_c$ 按行堆约束梯度；$B\approx\nabla^2_{xx}L$ 包含约束曲率。Exact 使用真实二阶导；BFGS 用同一乘子下的 Lagrangian 梯度差并检查曲率。
+### 几何与曲率
 
-### 几何与二阶信息
+$$
+Ad_N=-c,\quad AZ=0,\quad d=d_N+Zp,\quad H_R=Z^TBZ.
+$$
 
-$Ad_N=-c$ 修复线性可行性；$d_T=Zp$、$AZ=0$ 使用切自由度。Reduced Hessian 为 $Z^TBZ$；真实二阶充分条件在等式切空间、不等式临界锥上判断。
+等式 KKT 点的真实 $H_R\succ0$ 支持严格局部极小；不等式检查临界锥。BFGS 梯度差在新旧两点使用同一组乘子。
 
-### 三种验收思路
+### 三种验收与两种补救
 
-**Merit**：$f+\rho h$ 充分下降。**Filter**：对每个历史 pair 至少改善一维，近可行时加 switching / Armijo。**Funnel**：$h_t\le\tau$，f-type 要目标下降，h-type 收窄上界。
+**Merit**：$f+\rho h$ 充分下降。**Filter**：对每个历史 pair 至少改善一维，配合 switching / Armijo。**Funnel**：$h_t\le\tau$，f-type 验目标，h-type 收紧上界。
 
-### f / h 与两个补救模块
+**SOC**：$Aw\approx-c(x+d)$，用小修正消除二阶偏差。**Restoration**：正常优化失效后优先恢复可行性，再满足主算法重返条件。
 
-f-type 用正的预测目标下降触发并验真实下降；h-type 按相应可行性 / filter 规则验收。Switching 的指数和预测量依论文变化。SOC 修二阶约束误差；restoration 在正常步骤失效后优先降低违反度。
+### 总流程与停止含义
 
-### 算法骨架与停止含义
+**求导 → 构造 $B$ → 解 QP → 验收 / 缩步 → SOC 或恢复 → 更新点和乘子 → BFGS → 检查完整 KKT。**
 
-**求导 → 构造 / 更新 $B$ → 解 QP → 验收 / 回溯 → SOC 或 restoration → 更新点与乘子 → BFGS → 检查完整 KKT。**
+小残差是近似一阶条件，真实切向曲率用于局部性质判断；非凸 NLP 一般不保证全局最优。$f$、$h$ 不必每步单调，$\tau$ 单调本身也不保证 $h\to0$。
 
-KKT 包括 stationarity、原始可行、对偶可行、互补性。小残差说明近似一阶条件；真实正的切向曲率支持局部极小；非凸问题仍不保证全局最优。$f$ 和 $h$ 都不必逐步单调。
+## 参考与阅读方式
 
-## 参考与进一步阅读
+本系列根据提供的 SQP 学习总结重组，保留单位圆与三次约束推导，统一乘子符号，并补充适用条件、数值复核和接受流程。各知识点按“概念 → 数学结构 → 容易卡住的问题”组织。
 
-- 原教学对话：《不会嫌弃你》，本笔记按指定主题重组并补充；不保留聊天中的临时引用占位符。
-- [Wächter–Biegler：Filter line-search 的局部收敛分析](https://doi.org/10.1137/S1052623403426544)：用于核对 filter 与 SOC 的关系。
-- [Wächter–Biegler：内点 filter line-search 实现](https://doi.org/10.1007/s10107-004-0559-y)：用于理解 switching、restoration、SOC；算法本体为内点法。
-- [Kiessling、Leyffer、Vanaret：A Unified Funnel Restoration SQP Algorithm](https://arxiv.org/abs/2409.09208)：用于进一步核对 funnel 边界与恢复框架。本文的具体接受模块仍标为教学版本。
+- [Filter line-search 的局部收敛分析](https://doi.org/10.1137/S1052623403426544)：进一步理解 SOC 与局部收敛。
+- [Wächter–Biegler 的实现说明](https://doi.org/10.1007/s10107-004-0559-y)：进一步理解 filter、switching 和 restoration；其算法本体为内点法。
+- [A Unified Funnel Restoration SQP Algorithm](https://arxiv.org/abs/2409.09208)：进一步理解漏斗与恢复框架。
+
+不同论文的违反度、预测下降、switching 和历史更新必须一起阅读。本系列伪代码明确标为教学版本，不能直接当作某篇论文的收敛证明对象。

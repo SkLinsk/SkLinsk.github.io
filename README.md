@@ -9,6 +9,7 @@
 - `notes/sqp/index.html`：SQP 四篇系列总目录；同目录保留合订版 Markdown 与 PDF。
 - `notes/sqp/basics/`、`curvature/`、`filter/`、`funnel/`：四篇独立阅读页，每篇都有 `note.md` 与 `note.pdf` 下载。
 - `notes/sqp/assets/katex/`：完整的公式样式、TeX 数学字体与许可证。
+- `notes/functional-analysis/`：泛函分析随笔《一个映射》，含 `note.md` 下载；公式复用 `notes/sqp/assets/katex/` 的样式与字体。
 - `.nojekyll`：让 GitHub Pages 直接发布原始静态文件。
 
 在 `master` 分支提交后，GitHub Pages 自动发布。添加笔记时，同时更新首页与归档中的入口。公式 HTML 已预先排版；修改公式需重新渲染对应 HTML。不要移除 KaTeX 的字体声明、定位和间距规则，也不要对数学 SVG 应用导航图标的全局样式。

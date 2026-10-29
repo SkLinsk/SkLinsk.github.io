@@ -1,0 +1,44 @@
+[
+  {
+    "title": "SQP 基础",
+    "category": "约束优化",
+    "path": "notes/sqp/basics/note.md",
+    "url": "/notes/sqp/basics/",
+    "date": "2026-10-09"
+  },
+  {
+    "title": "二阶结构",
+    "category": "约束优化",
+    "path": "notes/sqp/curvature/note.md",
+    "url": "/notes/sqp/curvature/",
+    "date": "2026-10-09"
+  },
+  {
+    "title": "Filter 与全局化",
+    "category": "约束优化",
+    "path": "notes/sqp/filter/note.md",
+    "url": "/notes/sqp/filter/",
+    "date": "2026-10-09"
+  },
+  {
+    "title": "Funnel 与完整算法",
+    "category": "约束优化",
+    "path": "notes/sqp/funnel/note.md",
+    "url": "/notes/sqp/funnel/",
+    "date": "2026-10-09"
+  },
+  {
+    "title": "一个映射：加什么结构，就保持什么结构",
+    "category": "泛函分析",
+    "path": "notes/functional-analysis/note.md",
+    "url": "/notes/functional-analysis/",
+    "date": "2026-10-14"
+  },
+  {
+    "title": "共轭梯度法与 Krylov 子空间",
+    "category": "数值线性代数",
+    "path": "notes/cg/note.md",
+    "url": "/notes/cg/",
+    "date": "2026-10-22"
+  }
+]

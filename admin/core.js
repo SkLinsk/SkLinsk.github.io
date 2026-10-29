@@ -1,0 +1,22 @@
+(function(root){
+ const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+ function safeURL(s,image=false){s=String(s||'').trim();if(/[\u0000-\u0020]/.test(s))return '';try{const u=new URL(s,'https://sklinsk.github.io/');return ['http:','https:',...(image?[]:['mailto:'])].includes(u.protocol)?s:''}catch{return ''}}
+ function render(md,images={}){
+  const math=[],prefix='MATH'+Math.random().toString(36).slice(2)+'TOKEN';
+  const put=(s,display)=>{const i=math.length;math.push(root.katex.renderToString(s,{displayMode:display,throwOnError:true,strict:false,trust:false}));return prefix+i+'END'};
+  // Protect code first: formulas inside fenced/inline code remain literal.
+  const codes=[];md=String(md).replace(/```[\s\S]*?```|`[^`\n]*`/g,s=>{codes.push(s);return 'CODE'+prefix+(codes.length-1)+'END'});
+  md=md.replace(/\$\$([\s\S]*?)\$\$/g,(_,s)=>'\n\n'+put(s.trim(),true)+'\n\n').replace(/\$([^$\n]+)\$/g,(_,s)=>put(s,false));
+  md=md.replace(new RegExp('CODE'+prefix+'(\\d+)END','g'),(_,i)=>codes[+i]);
+  const renderer=new root.marked.Renderer();renderer.html=({text})=>esc(text);renderer.link=function({href,tokens}){const u=safeURL(href);return u?'<a href="'+esc(u)+'">'+this.parser.parseInline(tokens)+'</a>':this.parser.parseInline(tokens)};renderer.image=({href,text})=>{const u=safeURL(href,true);return u?'<img loading="lazy" src="'+esc(images[href]||u)+'" alt="'+esc(text)+'">':esc(text)};
+  let html=root.marked.parse(md,{renderer});html=html.replace(new RegExp('<p>('+prefix+'\\d+END)</p>','g'),'$1').replace(new RegExp(prefix+'(\\d+)END','g'),(_,i)=>math[+i].includes('katex-display')?'<div class="equation">'+math[+i]+'</div>':math[+i]);return html;
+ }
+ function article(post,source,old){let body=render(source).replace(/<h1>[\s\S]*?<\/h1>/,'');const cg=old?.match(/<figure class="cg-demo"[\s\S]*?<\/figure>/)?.[0];if(cg)body=body.replace(/<p><img[^>]*><\/p>/,cg);let n=0;const toc=[];body=body.replace(/<h2>([\s\S]*?)<\/h2>/g,(_,s)=>{const id='section-'+(++n);toc.push('<li><a href="#'+id+'">'+s+'</a></li>');return '<h2 id="'+id+'">'+s+'</h2>'});
+  const prefix=old?.slice(0,old.indexOf('<main id="main">'))||'<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>学习笔记</title><script src="/assets/theme.js"></script><link rel="stylesheet" href="/assets/site.css"><link rel="stylesheet" href="/notes/sqp/assets/katex/katex.min.css"></head><body><div class="shell"><header class="site-header"><a class="brand" href="/">SkLinsk / 笔记</a><a href="/archives/">归档</a></header>';
+  const suffix=old?.slice(old.indexOf('<footer class="site-footer">'))||'<footer class="site-footer"><a href="/">返回首页</a></footer></div></body></html>';
+  return prefix.replace(/<title>[\s\S]*?<\/title>/,'<title>'+esc(post.title)+' · SkLinsk 笔记</title>')+'<main id="main"><header class="article-head"><p class="eyebrow">'+esc(post.category)+'</p><h1>'+esc(post.title)+'</h1><div class="meta"><time>'+esc(post.date)+'</time></div><div class="article-actions"><a href="note.md" download>Markdown</a><a href="/">返回首页</a></div></header><div class="article-layout"><article class="prose">'+body+'</article><details class="toc" open><summary>文章目录</summary><ol>'+toc.join('')+'</ol></details></div></main>'+suffix;
+ }
+ function row(post){return '<article class="note-row"><time class="note-date">'+esc(post.date)+'</time><div><h3><a href="'+esc(post.url)+'">'+esc(post.title)+'</a></h3><p>'+esc(post.summary)+'</p><div class="tags"><span class="tag">'+esc(post.category)+'</span></div></div><a class="row-arrow" href="'+esc(post.url)+'" aria-label="阅读文章">↗</a></article>'}
+ function index(html,post,archive=false){const doc=new DOMParser().parseFromString(html,'text/html');const existing=[...doc.querySelectorAll('article.note-row')].find(e=>e.querySelector('a[href="'+post.url+'"]'));if(existing)existing.outerHTML=row(post);else{let area=archive?doc.querySelector('[aria-label="归档文章"]'):doc.querySelector('#writer-posts');if(!area){area=doc.createElement('section');area.id='writer-posts';area.innerHTML='<div class="section-label"><h2>最新文章</h2></div>';doc.querySelector('main').insertBefore(area,doc.querySelector('main .intro')?.nextSibling||doc.querySelector('main').firstChild)}area.insertAdjacentHTML(archive?'afterbegin':'beforeend',row(post))}return '<!doctype html>'+doc.documentElement.outerHTML;}
+ root.WriterCore={esc,safeURL,render,article,index};
+})(globalThis);

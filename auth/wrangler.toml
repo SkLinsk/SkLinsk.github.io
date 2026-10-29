@@ -1,0 +1,9 @@
+name = "sklinsk-writer-auth"
+main = "worker.mjs"
+compatibility_date = "2026-10-29"
+
+[vars]
+ALLOWED_ORIGIN = "https://sklinsk.github.io"
+ALLOWED_LOGIN = "SkLinsk"
+# GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET are configured in Workers settings.
+# Never commit the client secret to this repository.
